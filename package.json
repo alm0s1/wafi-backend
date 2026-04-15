@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "migrate": "psql $DATABASE_URL -f migrations/001_initial_schema.sql"
+    "migrate": "node -e \"require('dotenv').config(); require('./src/migrate').runMigrations().then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1); })\""
   },
   "dependencies": {
     "bcrypt": "^5.1.1",

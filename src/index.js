@@ -8,6 +8,7 @@ const db = require('./config/database');
 const redis = require('./config/redis');
 const firebase = require('./config/firebase');
 const { startRenewalCron } = require('./jobs/renewalCron');
+const { runMigrations } = require('./migrate');
 
 const authRoutes = require('./routes/auth');
 const subscriptionRoutes = require('./routes/subscription');
@@ -106,6 +107,9 @@ async function start() {
   try {
     // Connect to PostgreSQL
     await db.connect();
+
+    // Run pending database migrations
+    await runMigrations();
 
     // Connect to Redis
     await redis.connect();
