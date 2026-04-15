@@ -282,6 +282,7 @@ router.get(
            b.business_name_ar,
            b.business_name_en,
            b.logo_url,
+           COALESCE(lc.stamp_icon_url, b.stamp_icon_url) AS stamp_icon_url,
            b.phone AS business_phone
          FROM loyalty_cards lc
          JOIN businesses b ON b.id = lc.business_id
@@ -362,6 +363,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
          lc.reward_description, lc.qr_token, lc.is_active, lc.created_at,
          COALESCE(lc.brand_color, b.brand_color) AS brand_color,
          b.business_name_ar, b.business_name_en, b.logo_url,
+         COALESCE(lc.stamp_icon_url, b.stamp_icon_url) AS stamp_icon_url,
          c.name AS customer_name, c.phone AS customer_phone
        FROM loyalty_cards lc
        JOIN businesses b ON b.id = lc.business_id

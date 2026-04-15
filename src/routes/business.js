@@ -359,6 +359,29 @@ const upload = multer({
 });
 
 // ---------------------------------------------------------------------------
+// Multer setup for stamp icon uploads (separate filename pattern)
+// ---------------------------------------------------------------------------
+const stampStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `stamp-${req.user.id}-${Date.now()}${ext}`);
+  },
+});
+
+const stampUpload = multer({
+  storage: stampStorage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_TYPES.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('نوع الملف غير مدعوم. يُسمح بـ JPG و PNG و WebP فقط'));
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/business/upload-logo
 // Upload a business logo image and persist its URL.
 // ---------------------------------------------------------------------------
@@ -400,6 +423,52 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
+// POST /api/business/upload-stamp-icon
+// Upload a custom stamp icon image and persist its URL.
+// ---------------------------------------------------------------------------
+router.post(
+  '/upload-stamp-icon',
+  authMiddleware,
+  requireType('business'),
+  (req, res, next) => {
+    stampUpload.single('stamp_icon')(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({ error: 'حجم الملف يتجاوز الحد المسموح (5 ميجا)' });
+        }
+        return res.status(400).json({ error: err.message });
+      }
+      if (err) {
+        return res.status(400).json({ error: err.message });
+      }
+      next();
+    });
+  },
+  async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: 'لم يتم رفع أي ملف' });
+    }
+
+    const stampIconUrl = `/uploads/${req.file.filename}`;
+    try {
+      await db.query(
+        `UPDATE businesses SET stamp_icon_url = $1 WHERE id = $2`,
+        [stampIconUrl, req.user.id]
+      );
+      // Propagate to all active loyalty cards
+      await db.query(
+        `UPDATE loyalty_cards SET stamp_icon_url = $1 WHERE business_id = $2 AND is_active = true`,
+        [stampIconUrl, req.user.id]
+      );
+      return res.json({ success: true, stamp_icon_url: stampIconUrl });
+    } catch (err) {
+      console.error('upload-stamp-icon error:', err.message);
+      return res.status(500).json({ error: 'فشل حفظ أيقونة الطابع' });
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // GET /api/business/card-template
 // Fetch the current card template settings for the authenticated business.
 // Returns null stamps_required when the template has never been configured.
@@ -411,7 +480,7 @@ router.get(
   async (req, res) => {
     try {
       const result = await db.query(
-        `SELECT id, business_name_ar, brand_color, stamps_required, reward_description, logo_url
+        `SELECT id, business_name_ar, brand_color, stamps_required, reward_description, logo_url, stamp_icon_url
          FROM businesses WHERE id = $1`,
         [req.user.id]
       );
@@ -454,7 +523,7 @@ router.post(
       return res.status(400).json({ error: 'Validation failed', details: errors.array() });
     }
 
-    const { brand_color, stamps_required, reward_description, business_name_ar } = req.body;
+    const { brand_color, stamps_required, reward_description, business_name_ar, stamp_icon_url } = req.body;
     const businessId = req.user.id;
 
     const fields = [];
@@ -465,6 +534,7 @@ router.post(
     if (business_name_ar !== undefined)   { fields.push(`business_name_ar = $${paramIndex++}`);   values.push(business_name_ar); }
     if (stamps_required !== undefined)    { fields.push(`stamps_required = $${paramIndex++}`);    values.push(stamps_required); }
     if (reward_description !== undefined) { fields.push(`reward_description = $${paramIndex++}`); values.push(reward_description); }
+    if (stamp_icon_url !== undefined)    { fields.push(`stamp_icon_url = $${paramIndex++}`);    values.push(stamp_icon_url); }
 
     try {
       let updatedBusiness;
@@ -476,22 +546,22 @@ router.post(
            SET ${fields.join(', ')}
            WHERE id = $${paramIndex}
            RETURNING id, owner_name, business_name_ar, business_name_en,
-                     brand_color, logo_url, is_active`,
+                     brand_color, logo_url, stamp_icon_url, is_active`,
           values
         );
         updatedBusiness = result.rows[0];
       } else {
         const result = await db.query(
           `SELECT id, owner_name, business_name_ar, business_name_en,
-                  brand_color, logo_url, is_active
+                  brand_color, logo_url, stamp_icon_url, is_active
            FROM businesses WHERE id = $1`,
           [businessId]
         );
         updatedBusiness = result.rows[0];
       }
 
-      // Propagate brand_color, stamps_required, and/or reward_description to all active cards
-      if (brand_color !== undefined || stamps_required !== undefined || reward_description !== undefined) {
+      // Propagate brand_color, stamps_required, reward_description, and/or stamp_icon_url to all active cards
+      if (brand_color !== undefined || stamps_required !== undefined || reward_description !== undefined || stamp_icon_url !== undefined) {
         const cardFields = [];
         const cardValues = [];
         let cardIdx = 1;
@@ -499,6 +569,7 @@ router.post(
         if (brand_color !== undefined)        { cardFields.push(`brand_color = $${cardIdx++}`);        cardValues.push(brand_color); }
         if (stamps_required !== undefined)    { cardFields.push(`stamps_required = $${cardIdx++}`);    cardValues.push(stamps_required); }
         if (reward_description !== undefined) { cardFields.push(`reward_description = $${cardIdx++}`); cardValues.push(reward_description); }
+        if (stamp_icon_url !== undefined)     { cardFields.push(`stamp_icon_url = $${cardIdx++}`);     cardValues.push(stamp_icon_url); }
 
         cardValues.push(businessId);
         await db.query(

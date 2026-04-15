@@ -5,6 +5,7 @@ const { body, validationResult } = require('express-validator');
 const db = require('../config/database');
 const redis = require('../config/redis');
 const { authMiddleware } = require('../middleware/auth');
+const { OAuth2Client } = require('google-auth-library');
 
 const router = express.Router();
 
@@ -292,6 +293,97 @@ router.post(
     } catch (err) {
       console.error('Customer login error:', err.message);
       return res.status(500).json({ error: 'Login failed' });
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/auth/customer/google
+// Authenticate a customer via Google Sign-In ID token.
+// Creates a new account if the Google ID is not yet registered.
+// ---------------------------------------------------------------------------
+router.post(
+  '/customer/google',
+  [
+    body('id_token').trim().notEmpty().withMessage('رمز تسجيل الدخول من Google مطلوب'),
+    body('fcm_token').optional().trim(),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: 'Validation failed', details: errors.array() });
+    }
+
+    const { id_token, fcm_token } = req.body;
+
+    try {
+      // 1. Verify the Google ID token
+      const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+      let payload;
+      try {
+        const ticket = await client.verifyIdToken({
+          idToken: id_token,
+          audience: process.env.GOOGLE_CLIENT_ID,
+        });
+        payload = ticket.getPayload();
+      } catch (verifyErr) {
+        return res.status(401).json({ error: 'رمز Google غير صالح' });
+      }
+
+      const googleId = payload.sub;
+      const email = payload.email || null;
+      const name = payload.name || payload.given_name || 'مستخدم Google';
+
+      // 2. Look up existing customer by google_id
+      const existing = await db.query(
+        `SELECT id, name, phone, email, google_id, fcm_token, created_at
+         FROM customers WHERE google_id = $1`,
+        [googleId]
+      );
+
+      let customer;
+      let isNewAccount = false;
+
+      if (existing.rows.length > 0) {
+        // Existing customer — login
+        customer = existing.rows[0];
+
+        // Update FCM token if provided and different
+        if (fcm_token && fcm_token !== customer.fcm_token) {
+          await db.query(
+            'UPDATE customers SET fcm_token = $1 WHERE id = $2',
+            [fcm_token, customer.id]
+          );
+        }
+      } else {
+        // New customer — register
+        const result = await db.query(
+          `INSERT INTO customers (name, email, google_id, fcm_token)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, name, phone, email, google_id, created_at`,
+          [name, email, googleId, fcm_token || null]
+        );
+        customer = result.rows[0];
+        isNewAccount = true;
+      }
+
+      // 3. Generate JWT tokens
+      const tokenPayload = { id: customer.id, type: 'customer', email: customer.email };
+      const { accessToken, refreshToken } = generateTokens(tokenPayload);
+      await storeRefreshToken(customer.id, refreshToken);
+
+      const status = isNewAccount ? 201 : 200;
+      return res.status(status).json({
+        success: true,
+        data: {
+          customer,
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        },
+      });
+    } catch (err) {
+      console.error('Google auth error:', err.message);
+      return res.status(500).json({ error: 'فشل تسجيل الدخول بحساب Google' });
     }
   }
 );
