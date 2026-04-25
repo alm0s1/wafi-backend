@@ -67,6 +67,78 @@ router.get('/by-id/:id', authMiddleware, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/business/analytics
+// Extended analytics: daily stamp trend (7 days), top customers, totals.
+// ---------------------------------------------------------------------------
+router.get(
+  '/analytics',
+  authMiddleware,
+  requireType('business'),
+  checkSubscription,
+  async (req, res) => {
+    const businessId = req.user.id;
+
+    try {
+      const [dailyStampsResult, topCustomersResult, overallResult] =
+        await Promise.all([
+          // Stamps per day for last 7 days
+          db.query(
+            `SELECT d::date AS date, COALESCE(COUNT(s.id), 0)::int AS count
+             FROM generate_series(
+               CURRENT_DATE - INTERVAL '6 days', CURRENT_DATE, '1 day'
+             ) d
+             LEFT JOIN stamps s
+               ON s.business_id = $1
+               AND s.created_at::date = d::date
+             GROUP BY d::date
+             ORDER BY d::date ASC`,
+            [businessId]
+          ),
+
+          // Top 5 customers by stamp count
+          db.query(
+            `SELECT c.name, c.phone, COUNT(s.id)::int AS stamp_count,
+                    MAX(s.created_at) AS last_stamp
+             FROM stamps s
+             JOIN loyalty_cards lc ON lc.id = s.loyalty_card_id
+             JOIN customers c ON c.id = lc.customer_id
+             WHERE s.business_id = $1
+             GROUP BY c.id, c.name, c.phone
+             ORDER BY stamp_count DESC
+             LIMIT 5`,
+            [businessId]
+          ),
+
+          // Overall stats
+          db.query(
+            `SELECT
+               (SELECT COUNT(*)::int FROM stamps WHERE business_id = $1) AS total_stamps,
+               (SELECT COUNT(DISTINCT customer_id)::int FROM loyalty_cards WHERE business_id = $1) AS total_customers,
+               (SELECT COALESCE(SUM(total_completed), 0)::int FROM loyalty_cards WHERE business_id = $1) AS total_rewards,
+               (SELECT COUNT(*)::int FROM loyalty_cards WHERE business_id = $1) AS total_cards`,
+            [businessId]
+          ),
+        ]);
+
+      return res.json({
+        success: true,
+        data: {
+          daily_stamps: dailyStampsResult.rows,
+          top_customers: topCustomersResult.rows,
+          total_stamps: overallResult.rows[0]?.total_stamps ?? 0,
+          total_customers: overallResult.rows[0]?.total_customers ?? 0,
+          total_rewards: overallResult.rows[0]?.total_rewards ?? 0,
+          total_cards: overallResult.rows[0]?.total_cards ?? 0,
+        },
+      });
+    } catch (err) {
+      console.error('analytics error:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch analytics' });
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // GET /api/business/dashboard
 // Summary statistics and recent activity for the business owner dashboard.
 // ---------------------------------------------------------------------------

@@ -348,6 +348,92 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
+// GET /api/cards/:id/history
+// Returns stamp and reward history for a loyalty card (timeline events).
+// MUST be defined before /:id to avoid Express matching "history" as an id.
+// ---------------------------------------------------------------------------
+router.get('/:id/history', authMiddleware, async (req, res) => {
+  const { id } = req.params;
+  const { user } = req;
+
+  try {
+    // Verify the card exists and check access
+    const cardResult = await db.query(
+      'SELECT business_id, customer_id, stamps_required, total_completed, reward_description FROM loyalty_cards WHERE id = $1',
+      [id]
+    );
+
+    if (cardResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Loyalty card not found' });
+    }
+
+    const card = cardResult.rows[0];
+    const isOwningBusiness = user.type === 'business' && card.business_id === user.id;
+    const isOwningCustomer = user.type === 'customer' && card.customer_id === user.id;
+
+    if (!isOwningBusiness && !isOwningCustomer) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Fetch all stamps for this card, chronological order
+    const stampsResult = await db.query(
+      `SELECT s.id, s.added_by, s.created_at
+       FROM stamps s
+       WHERE s.loyalty_card_id = $1
+       ORDER BY s.created_at ASC`,
+      [id]
+    );
+
+    // Build timeline events
+    const events = [];
+    const stamps = stampsResult.rows;
+    let cycleStampCount = 0;
+    let cycleNumber = 0;
+
+    for (const stamp of stamps) {
+      cycleStampCount++;
+
+      // Stamp event
+      events.push({
+        id: stamp.id,
+        type: 'stamp_added',
+        date: stamp.created_at,
+        stamp_number: cycleStampCount,
+        stamps_required: card.stamps_required,
+      });
+
+      // If this stamp completes a cycle, add a reward event
+      if (cycleStampCount >= card.stamps_required) {
+        cycleNumber++;
+        events.push({
+          id: `reward-${cycleNumber}`,
+          type: 'reward_earned',
+          date: stamp.created_at,
+          cycle: cycleNumber,
+          reward_description: card.reward_description || null,
+        });
+        cycleStampCount = 0;
+      }
+    }
+
+    // Return newest first
+    events.reverse();
+
+    return res.json({
+      success: true,
+      data: {
+        events,
+        total_stamps: stamps.length,
+        total_rewards: card.total_completed,
+      },
+    });
+  } catch (err) {
+    console.error('cards/:id/history error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch history' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/cards/:id
 // Get a single loyalty card by ID (accessible by owning business or customer).
 // ---------------------------------------------------------------------------
@@ -364,6 +450,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
          COALESCE(lc.brand_color, b.brand_color) AS brand_color,
          b.business_name_ar, b.business_name_en, b.logo_url,
          COALESCE(lc.stamp_icon_url, b.stamp_icon_url) AS stamp_icon_url,
+         b.join_code,
          c.name AS customer_name, c.phone AS customer_phone
        FROM loyalty_cards lc
        JOIN businesses b ON b.id = lc.business_id
